@@ -1,0 +1,18 @@
+# Secrets and host-only config
+cloudflare-jail.env
+*.env
+!cloudflare-jail.env.example
+cloudflare-jail.allow
+cloudflare-jail.paths
+
+# Local migration artefacts — contain live jail entries
+block_bots.txt
+jail_list.csv
+
+# Superseded script that once contained live API keys
+parse_logs.sh.txt
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+*.swp
