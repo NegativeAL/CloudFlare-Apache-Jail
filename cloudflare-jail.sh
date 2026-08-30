@@ -38,6 +38,24 @@ if [[ -f "$CREDENTIALS_FILE" ]]; then
     source "$CREDENTIALS_FILE"
 fi
 
+# Trim CR/LF/spaces copied from Windows editors or quoted paste.
+sanitize_secret() {
+    local value="${1-}"
+    value="${value%$'\r'}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    value="${value#\"}"
+    value="${value%\"}"
+    value="${value#\'}"
+    value="${value%\'}"
+    printf '%s' "$value"
+}
+ABUSEIPDB_API_KEY="$(sanitize_secret "${ABUSEIPDB_API_KEY-}")"
+CLOUDFLARE_API_TOKEN="$(sanitize_secret "${CLOUDFLARE_API_TOKEN-}")"
+CLOUDFLARE_ACCOUNT_ID="$(sanitize_secret "${CLOUDFLARE_ACCOUNT_ID-}")"
+CLOUDFLARE_LIST_NAME="$(sanitize_secret "${CLOUDFLARE_LIST_NAME:-jail_list}")"
+CLOUDFLARE_LIST_ID="$(sanitize_secret "${CLOUDFLARE_LIST_ID-}")"
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -c|--count) HIT_THRESHOLD="$2"; shift 2 ;;
@@ -169,6 +187,23 @@ cf_api() {
             -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
             -H "Content-Type: application/json"
     fi
+}
+
+verify_cloudflare_token() {
+    local verify
+    verify=$(curl -sS "https://api.cloudflare.com/client/v4/user/tokens/verify" \
+        -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+        -H "Content-Type: application/json") || true
+    if echo "$verify" | jq -e '.success == true and .result.status == "active"' >/dev/null 2>&1; then
+        echo "Cloudflare token is active (length ${#CLOUDFLARE_API_TOKEN}, account ${CLOUDFLARE_ACCOUNT_ID})."
+        return 0
+    fi
+    echo "Cloudflare token was rejected before any list call." >&2
+    echo "Token length: ${#CLOUDFLARE_API_TOKEN}. Account ID length: ${#CLOUDFLARE_ACCOUNT_ID}." >&2
+    echo "Create a *API Token* (not Global API Key) with Account → Account Filter Lists → Edit," >&2
+    echo "scoped to this account, then put only the token value in CLOUDFLARE_API_TOKEN." >&2
+    echo "$verify" | jq . >&2
+    return 1
 }
 
 resolve_list_id() {
@@ -340,6 +375,24 @@ decide_cidr() {
     iputil host "$ip"
 }
 
+skip_reason() {
+    local score="$1" usage="$2" country="$3"
+    country=$(echo "$country" | tr '[:lower:]' '[:upper:]')
+    if [[ "$country" == "GB" ]]; then
+        if ! is_hosting "$usage"; then
+            echo "GB residential/ISP (not jailed)"
+            return
+        fi
+        echo "GB hosting score ${score} < ${SCORE_GB_HOSTING}"
+        return
+    fi
+    echo "score ${score} < ${SCORE_JAIL}"
+}
+
+queued_cidr() {
+    awk -F '\t' -v c="$1" '$1 == c { found=1; exit } END { exit !found }' "$2"
+}
+
 parse_log() {
     local log_path="$1"
     local domain="$2"
@@ -404,7 +457,7 @@ queue_cidr() {
         echo "      already on list: $cidr"
         return
     fi
-    if grep -Fxq "$cidr" "$NEW_BLOCKS_LIST"; then
+    if queued_cidr "$cidr" "$NEW_BLOCKS_LIST"; then
         echo "      already queued: $cidr"
         return
     fi
@@ -418,6 +471,10 @@ push_list_items() {
         echo "No new list items."
         return
     fi
+    local unique
+    unique=$(mktemp)
+    awk -F '\t' '$1 != "" && !seen[$1]++' "$NEW_BLOCKS_LIST" > "$unique"
+    mv "$unique" "$NEW_BLOCKS_LIST"
     local payload="[]" cidr comment
     while IFS=$'\t' read -r cidr comment; do
         [[ -z "$cidr" ]] && continue
@@ -444,9 +501,12 @@ push_list_items() {
 }
 
 if [[ "$INIT_LIST" = true ]]; then
+    verify_cloudflare_token
     init_list
     exit 0
 fi
+
+verify_cloudflare_token
 
 mkdir -p "$CACHE_DIR" "$(dirname "$LOCK_FILE")"
 exec 9>"$LOCK_FILE"
@@ -512,7 +572,7 @@ for log_path in "${!DOMAIN_MATRIX[@]}"; do
         echo "      AbuseIPDB score=${score}% country=${country} usage=${usage} isp=${isp}"
 
         if ! cidr=$(decide_cidr "$ip" "$score" "$usage" "$country"); then
-            echo "      skip: below jail policy (GB residential or score < ${SCORE_JAIL})"
+            echo "      skip: $(skip_reason "$score" "$usage" "$country")"
             continue
         fi
 
