@@ -278,7 +278,8 @@ if iputil skip "127.0.0.1"; then assert_ok "skip loopback"; else assert_fail_msg
 if iputil skip "10.1.2.3"; then assert_ok "skip RFC1918"; else assert_fail_msg "skip RFC1918"; fi
 if iputil skip "100.64.1.1"; then assert_ok "skip CGNAT"; else assert_fail_msg "skip CGNAT"; fi
 if iputil skip "162.158.1.1"; then assert_ok "skip Cloudflare edge"; else assert_fail_msg "skip Cloudflare edge"; fi
-if iputil skip "198.51.100.10"; then assert_fail_msg "public TEST-NET should not skip"; else assert_ok "public TEST-NET not skipped"; fi
+# Documentation/TEST-NET ranges are reserved and skipped; use a real public address.
+if iputil skip "8.8.8.8"; then assert_fail_msg "public IP should not skip"; else assert_ok "public IP not skipped"; fi
 
 echo "office 203.0.113.9" > "$ALLOW_FILE"
 if iputil skip "203.0.113.9"; then assert_ok "skip allowlisted host"; else assert_fail_msg "skip allowlisted host"; fi
