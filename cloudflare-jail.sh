@@ -67,18 +67,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-for cmd in curl jq python3; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        echo "Missing dependency: $cmd" >&2
-        exit 1
-    fi
-done
-
-if [[ -z "${ABUSEIPDB_API_KEY:-}" || -z "${CLOUDFLARE_API_TOKEN:-}" || -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]]; then
-    echo "Set ABUSEIPDB_API_KEY, CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID in $CREDENTIALS_FILE" >&2
-    exit 1
-fi
-
 # log path -> domain name
 declare -A DOMAIN_MATRIX
 DOMAIN_MATRIX=(
@@ -491,6 +479,23 @@ push_list_items() {
     fi
     echo "Submitted $(echo "$payload" | jq 'length') item(s) to $CLOUDFLARE_LIST_NAME"
 }
+
+# Allow tests to `source` this file for count_candidates without hitting APIs.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    return 0
+fi
+
+for cmd in curl jq python3; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo "Missing dependency: $cmd" >&2
+        exit 1
+    fi
+done
+
+if [[ -z "${ABUSEIPDB_API_KEY:-}" || -z "${CLOUDFLARE_API_TOKEN:-}" || -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]]; then
+    echo "Set ABUSEIPDB_API_KEY, CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID in $CREDENTIALS_FILE" >&2
+    exit 1
+fi
 
 if [[ "$INIT_LIST" = true ]]; then
     verify_cloudflare_token
