@@ -413,42 +413,34 @@ parse_log() {
 count_candidates() {
     local log_path="$1"
     local domain="$2"
-    local parsed hits_file probe_file
-    parsed=$(mktemp)
-    hits_file=$(mktemp)
-    probe_file=$(mktemp)
-    parse_log "$log_path" "$domain" > "$parsed"
+    local awk_pat=""
+    local p
+    for p in "${PROBE_PATTERNS[@]}"; do
+        awk_pat+="${awk_pat:+|}${p}"
+    done
 
-    awk -F '\t' '{c[$1]++} END {for (ip in c) print c[ip], ip}' "$parsed" \
-        | sort -nr > "$hits_file"
-
-    if ((${#PROBE_PATTERNS[@]})); then
-        local awk_pat=""
-        local p
-        for p in "${PROBE_PATTERNS[@]}"; do
-            awk_pat+="${awk_pat:+|}${p}"
-        done
-        awk -F '\t' -v pat="$awk_pat" '
-            $2 ~ pat { c[$1]++ }
-            END { for (ip in c) print c[ip], ip }
-        ' "$parsed" | sort -nr > "$probe_file"
-    fi
-
-    declare -A SEEN=()
-    local hits ip probe
-    while read -r hits ip; do
-        [[ -z "${ip:-}" ]] && continue
-        probe=$(awk -v ip="$ip" '$2 == ip { print $1; exit }' "$probe_file")
-        probe="${probe:-0}"
-        if [[ "$hits" -ge "$HIT_THRESHOLD" || "$probe" -ge "$PROBE_THRESHOLD" ]]; then
-            if [[ -z "${SEEN[$ip]:-}" ]]; then
-                echo -e "${hits}\t${probe}\t${ip}"
-                SEEN[$ip]=1
-            fi
-        fi
-    done < "$hits_file"
-
-    rm -f "$parsed" "$hits_file" "$probe_file"
+    # One awk pass: count hits and probes, then emit IPs that meet either
+    # threshold. The previous bash loop spawned awk once per unique IP and
+    # scanned probe counts from scratch — O(unique_ips * log_size) — which
+    # looked like a hang on busy access logs (high CPU in bash, tee idle).
+    parse_log "$log_path" "$domain" | awk -F '\t' \
+        -v pat="$awk_pat" \
+        -v hit_th="$HIT_THRESHOLD" \
+        -v probe_th="$PROBE_THRESHOLD" '
+        {
+            ip = $1
+            if (ip == "") next
+            hits[ip]++
+            if (pat != "" && $2 ~ pat) probes[ip]++
+        }
+        END {
+            for (ip in hits) {
+                p = (ip in probes) ? probes[ip] + 0 : 0
+                if (hits[ip] + 0 >= hit_th + 0 || p >= probe_th + 0)
+                    printf "%d\t%d\t%s\n", hits[ip], p, ip
+            }
+        }
+    ' | sort -t $'\t' -k1,1nr -k2,2nr
 }
 
 queue_cidr() {
@@ -523,8 +515,9 @@ fi
 
 EXISTING_ITEMS=$(mktemp)
 NEW_BLOCKS_LIST=$(mktemp)
+CANDIDATES_FILE=$(mktemp)
 EMAIL_BODY=$(mktemp)
-trap 'rm -f "$EXISTING_ITEMS" "$NEW_BLOCKS_LIST"' EXIT
+trap 'rm -f "$EXISTING_ITEMS" "$NEW_BLOCKS_LIST" "$CANDIDATES_FILE"' EXIT
 
 fetch_list_items "$LIST_ID"
 
@@ -550,6 +543,10 @@ for log_path in "${!DOMAIN_MATRIX[@]}"; do
         echo "   Log file not found, skipping."
         continue
     fi
+
+    echo "   Scanning log for candidates (hits>=${HIT_THRESHOLD} or probes>=${PROBE_THRESHOLD})..."
+    count_candidates "$log_path" "$DOMAIN_NAME" > "$CANDIDATES_FILE"
+    echo "   Candidates: $(wc -l < "$CANDIDATES_FILE" | tr -d ' ')"
 
     while IFS=$'\t' read -r hits probe ip; do
         echo "   -------------------------------------------------------------"
@@ -577,7 +574,7 @@ for log_path in "${!DOMAIN_MATRIX[@]}"; do
         fi
 
         queue_cidr "$cidr" "${DOMAIN_NAME} score ${score} ${country} ${usage}"
-    done < <(count_candidates "$log_path" "$DOMAIN_NAME")
+    done < "$CANDIDATES_FILE"
 done
 
 echo ""
